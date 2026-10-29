@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>蔗糖的定时任务~</title>
+<style>
+  :root { --line:#f3c6d8; --text:#5a3a48; --dim:#b98da0; --acc:#ff7fa9; --acc2:#ffb3cd;
+    --ok:#e8749c; --bad:#e06c5a; --warn:#d9a441; --blue:#9a8cf0; --card:#fffdfb; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { height:100%; }
+  body {
+    color:var(--text); font:14px/1.65 "Segoe UI","Microsoft YaHei",sans-serif;
+    background:linear-gradient(120deg,#ffe9f2,#fff4ea,#efeaff,#ffe6f2,#ffe9f2);
+    background-size:400% 400%; animation:bgflow 22s ease infinite; overflow:hidden;
+  }
+  @keyframes bgflow { 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
+  .app { display:flex; height:100vh; }
+
+  /* ---------- 左侧 ---------- */
+  .side { width:250px; flex:0 0 250px; display:flex; flex-direction:column; padding:18px 14px 14px;
+    background:#fffafcd9; border-right:1px solid var(--line); backdrop-filter:blur(6px); }
+  .brand { font-size:16px; font-weight:600; color:#e2568a; letter-spacing:.2px; }
+  .status { color:var(--dim); font-size:11.5px; margin:3px 0 14px; line-height:1.6; }
+  .status b { color:#e2568a; }
+  .navitem { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:9px; cursor:pointer;
+    font-size:13px; color:#8d6b7a; transition:.14s; margin-bottom:2px; }
+  .navitem:hover { background:#fff0f6; color:#e2568a; }
+  .navitem.act { background:#fff0f6; color:#e2568a; font-weight:600; }
+  .navitem em { margin-left:auto; font-style:normal; font-size:11px; color:var(--dim); }
+  .sidefoot { margin-top:auto; border-top:1px dashed var(--line); padding-top:10px;
+    font-size:11px; color:var(--dim); line-height:1.7; }
+  .sidefoot code { background:#fff0f6; border-radius:5px; padding:0 5px; color:#c66f95; word-break:break-all; }
+
+  /* ---------- 右侧 ---------- */
+  .main { flex:1; min-width:0; padding:20px 26px 10px; display:flex; flex-direction:column; overflow:hidden; }
+  .head { display:flex; align-items:center; gap:13px; margin-bottom:14px; }
+  .head .big { width:40px; height:40px; flex:0 0 40px; border-radius:50%; display:flex; align-items:center;
+    justify-content:center; font-size:18px; color:#fff; background:linear-gradient(135deg,#ffa8c6,#ff8fb8); }
+  .head h2 { font-size:17px; font-weight:600; color:#c94f7c; line-height:1.3; }
+  .head .meta { font-size:11.5px; color:var(--dim); }
+  .tools { margin-left:auto; display:flex; gap:8px; }
+  .btn { background:#fff; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:6px 13px;
+    cursor:pointer; font-size:12.5px; font-family:inherit; transition:.15s; white-space:nowrap; }
+  .btn:hover { border-color:var(--acc); color:#e2568a; }
+  .btn.primary { background:var(--acc); border-color:var(--acc); color:#fff; }
+  .btn.primary:hover { background:#ff6a9b; color:#fff; }
+  .btn.mini { padding:3px 10px; font-size:12px; }
+  .btn.danger { color:var(--bad); border-color:#f0c4bb; background:#fff8f6; }
+  .btn.danger:hover { background:var(--bad); border-color:var(--bad); color:#fff; }
+  .btn:disabled { opacity:.55; cursor:default; }
+
+  .scroll { flex:1; overflow-y:auto; padding-right:4px; padding-bottom:30px; }
+  .pane { display:none; } .pane.act { display:block; }
+  .lead { color:var(--dim); font-size:12px; margin-bottom:12px; }
+
+  /* ---------- 任务卡片 ---------- */
+  .job { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 15px;
+    margin-bottom:9px; transition:.15s; }
+  .job:hover { border-color:var(--acc2); }
+  .job.off { opacity:.62; }
+  .jtop { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .jname { font-size:14.5px; font-weight:600; color:#c94f7c; }
+  .chip { font-size:11px; border-radius:6px; padding:0 7px; border:1px solid var(--line); line-height:1.8; }
+  .chip.mode-ai { color:var(--blue); background:#f3f0ff; border-color:#ddd6ff; }
+  .chip.mode-text { color:#4f89a8; background:#eef8fc; border-color:#cde9f3; }
+  .chip.once { color:#b57d1f; background:#fff8e8; border-color:#f3dfb0; }
+  .chip.on { color:#fff; background:var(--ok); border-color:var(--ok); }
+  .chip.offc { color:#a88a97; background:#f7f4fa; border-color:#e4dcec; }
+  .chip.mem { color:#e2568a; background:#fff0f5; border-color:#ffd0e0; }
+  .jacts { margin-left:auto; display:flex; gap:6px; }
+  .jmeta { color:var(--dim); font-size:11.5px; margin-top:5px; line-height:1.8; }
+  .jmeta b { color:#cc8fa8; font-weight:600; }
+  .jbody { margin-top:5px; font-size:12.5px; color:#7d5f6d; background:#fff6fa; border:1px dashed #f7dbe7;
+    border-radius:8px; padding:6px 11px; word-break:break-word; }
+  .jcause { margin-top:4px; font-size:11.5px; color:var(--dim); }
+  .jcause em { font-style:normal; color:#cc8fa8; }
+  .jerr { margin-top:4px; font-size:11.5px; color:var(--bad); }
+
+  /* ---------- 运行记录 ---------- */
+  .run { background:var(--card); border:1px solid var(--line); border-radius:9px; padding:8px 12px;
+    margin-bottom:7px; display:flex; gap:10px; align-items:flex-start; font-size:12.5px; }
+  .run .time { flex:0 0 auto; color:#cfa9b9; font-size:11px; padding-top:2px; width:130px; }
+  .run .body { flex:1; min-width:0; word-break:break-word; }
+  .run .who { color:#cc8fa8; }
+  .run .err { color:var(--bad); font-size:11.5px; }
+  .chip.okc { color:#fff; background:var(--ok); border-color:var(--ok); }
+  .chip.failc { color:#fff; background:var(--bad); border-color:var(--bad); }
+  .chip.manual { color:#b57d1f; background:#fff8e8; border-color:#f3dfb0; }
+
+  /* ---------- 总配置 ---------- */
+  .cfggroup { background:var(--card); border:1px solid var(--line); border-radius:12px;
+    padding:12px 16px; margin-bottom:10px; }
+  .cfggroup h3 { font-size:13.5px; color:#c94f7c; margin-bottom:2px; }
+  .cfggroup .gh { color:var(--dim); font-size:11.5px; margin-bottom:10px; }
+  .cfgrow { display:flex; gap:12px; align-items:flex-start; padding:7px 0; border-top:1px dashed #fbe3ec; }
+  .cfgrow label { flex:0 0 150px; font-size:13px; padding-top:4px; }
+  .cfgrow .cbody { flex:1; min-width:0; }
+  .cfgrow input[type=text], .cfgrow input[type=number], .cfgrow textarea {
+    width:100%; background:#fff; border:1px solid var(--line); border-radius:8px; padding:6px 10px;
+    font-size:12.5px; color:var(--text); outline:none; font-family:inherit; }
+  .cfgrow textarea { min-height:52px; resize:vertical; }
+  .cfgrow input:focus, .cfgrow textarea:focus { border-color:var(--acc); box-shadow:0 0 0 3px #ff7fa933; }
+  .cfgrow .hint { color:var(--dim); font-size:11px; margin-top:3px; line-height:1.6; }
+  .switch { position:relative; width:40px; height:22px; flex:0 0 40px; margin-top:4px; }
+  .switch input { opacity:0; width:0; height:0; }
+  .switch i { position:absolute; inset:0; border-radius:20px; background:#ecd7e0; transition:.2s; cursor:pointer; }
+  .switch i:before { content:""; position:absolute; width:16px; height:16px; left:3px; top:3px;
+    border-radius:50%; background:#fff; transition:.2s; }
+  .switch input:checked + i { background:var(--acc); }
+  .switch input:checked + i:before { transform:translateX(18px); }
+
+  /* ---------- 帮助 ---------- */
+  .help { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 18px;
+    margin-bottom:10px; font-size:12.5px; line-height:1.9; }
+  .help h3 { font-size:13.5px; color:#c94f7c; margin-bottom:6px; }
+  .help p { margin-bottom:6px; }
+  .help code { background:#fff0f6; border-radius:5px; padding:0 5px; color:#c66f95; word-break:break-all; }
+  .help .dim { color:var(--dim); }
+
+  /* ---------- 弹窗 ---------- */
+  .mask { position:fixed; inset:0; background:#5a3a4866; display:none; align-items:center; justify-content:center; z-index:50; }
+  .mask.act { display:flex; }
+  .modal { width:min(680px, 94vw); max-height:92vh; overflow-y:auto; background:#fffdfb; border:1px solid var(--line);
+    border-radius:14px; padding:18px 20px 16px; }
+  .modal h3 { font-size:15px; color:#c94f7c; margin-bottom:10px; }
+  .msec { border:1px solid #fbe3ec; border-radius:10px; padding:10px 13px 12px; margin-bottom:10px; }
+  .msec > .st { font-size:12px; font-weight:600; color:#c94f7c; margin-bottom:8px; }
+  .msec > .st span { color:var(--dim); font-weight:400; margin-left:8px; }
+  .frow { display:flex; gap:10px; align-items:flex-start; margin-bottom:8px; }
+  .frow:last-child { margin-bottom:0; }
+  .frow label { flex:0 0 86px; font-size:12.5px; padding-top:6px; }
+  .frow .fbody { flex:1; min-width:0; }
+  .frow input[type=text], .frow input[type=datetime-local], .frow textarea, .frow select {
+    width:100%; background:#fff; border:1px solid var(--line); border-radius:8px; padding:6px 10px;
+    font-size:12.5px; color:var(--text); outline:none; font-family:inherit; }
+  .frow textarea { min-height:60px; resize:vertical; }
+  .frow input:focus, .frow textarea:focus, .frow select:focus { border-color:var(--acc); box-shadow:0 0 0 3px #ff7fa933; }
+  .frow .hint { color:var(--dim); font-size:11px; margin-top:2px; line-height:1.6; }
+  .radios { display:flex; gap:14px; padding-top:5px; flex-wrap:wrap; }
+  .radios label { display:flex; gap:5px; align-items:center; font-size:12.5px; cursor:pointer; flex:0 0 auto; padding:0; }
+  .tmpl { display:flex; gap:6px; flex-wrap:wrap; margin-top:5px; }
+  .tmpl button { background:#fff0f6; border:1px solid #ffd0e0; color:#c66f95; border-radius:6px;
+    padding:2px 9px; font-size:11px; cursor:pointer; font-family:inherit; }
+  .tmpl button:hover { background:#ffe0ec; }
+  .mfoot { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
+  .askbox { width:min(400px, 92vw); }
+  .askdetail { font-size:12.5px; color:#8d6b7a; line-height:1.7; margin-bottom:14px; word-break:break-word; }
+  .toast { position:fixed; left:50%; bottom:34px; transform:translateX(-50%) translateY(20px);    background:#c94f7c; color:#fff; border-radius:20px; padding:8px 20px; font-size:12.5px;
+    opacity:0; transition:.25s; pointer-events:none; z-index:99; max-width:80vw; }
+  .toast.act { opacity:1; transform:translateX(-50%) translateY(0); }
+  .empty { text-align:center; color:var(--dim); font-size:12.5px; padding:50px 0; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">蔗糖的定时任务~</div>
+    <div class="status" id="stat">加载中…</div>
+    <div class="navitem act" data-pane="jobs">📋 任务列表 <em id="nav-jobs"></em></div>
+    <div class="navitem" data-pane="runs">🕘 运行记录 <em id="nav-runs"></em></div>
+    <div class="navitem" data-pane="config">⚙️ 总配置</div>
+    <div class="navitem" data-pane="help">📖 说明</div>
+    <div class="sidefoot">
+      面板接口前缀<br><code>/api/plug/astrbot_plugin_sugarcron</code><br>
+      聊天里直接说「每天8点提醒我XX」，AI 会自己建任务。
+    </div>
+  </aside>
+  <main class="main">
+    <div class="head">
+      <div class="big">⏰</div>
+      <div>
+        <h2 id="pane-title">任务列表</h2>
+        <div class="meta" id="pane-meta">到点自动发，发完记进记忆</div>
+      </div>
+      <div class="tools" id="head-tools">
+        <button class="btn" onclick="refreshAll()">刷新</button>
+        <button class="btn primary" onclick="openEditor()">＋ 新建任务</button>
+      </div>
+    </div>
+    <div class="scroll">
+      <div class="pane act" id="pane-jobs"><div class="lead">到点后按任务发往目标会话；开着「记忆标记」的，发出去的话会带任务名和起因记进 sugarmemory，AI 被问「为什么发这个」能答上来。</div><div id="joblist"></div></div>
+      <div class="pane" id="pane-runs"><div class="lead">每次到点执行（含手动试跑）都记一条，只保留最近的。</div><div id="runlist"></div></div>
+      <div class="pane" id="pane-config"><div class="lead">改完点底部保存，立刻生效，不用重载插件。</div><div id="cfglist"></div><div style="text-align:right;margin-top:6px;"><button class="btn primary" onclick="saveCfg()">保存配置</button></div></div>
+      <div class="pane" id="pane-help">
+        <div class="help">
+          <h3>这插件和自带定时任务差在哪</h3>
+          <p>自带的定时任务到点把消息发出去就完了，AI 自己「读不到」自己说了什么——你换个会话问它「你为什么发这个」，它只能瞎猜或者干脆否认。</p>
+          <p>本插件每条定时消息发出前都会打个标记给 <b>蔗糖的记忆中枢（sugarmemory）</b>：记录开头写成「你按定时任务「早安」发给群 xxx」，后面钉上<b>起因</b>（建任务时你说的原话）。这样不管在哪个会话被问起，AI 都能从记忆包里翻出「我发过什么、为什么发」。</p>
+          <p class="dim">需要 sugarmemory 在跑（2026-10-27 之后的版本认识 label 字段）；没装也能用，只是 AI 事后记不住。</p>
+        </div>
+        <div class="help">
+          <h3>任务怎么建</h3>
+          <p>① 聊天里直接说：「每天早上8点在群里问个早」→ AI 调 <code>sugar_cron_add</code> 自己建；<br>
+             ② 本面板点「＋ 新建任务」；<br>
+             ③ 指令：<code>/定时任务 list</code>、<code>/定时任务 off &lt;id&gt;</code>、<code>/定时任务 run &lt;id&gt;</code>（管理员）。</p>
+        </div>
+        <div class="help">
+          <h3>两种内容模式</h3>
+          <p><b>固定文本</b>：到点原样发，零模型调用；<b>AI 生成</b>：到点把「任务说明」+ 目标会话的人设喂给模型，让它现场写一段——听起来还是「它」在说话，不是机器人群发。</p>
+          <p class="dim">AI 生成用的模型在「总配置 → 发送」里选，留空 = 目标会话当前模型。</p>
+        </div>
+        <div class="help">
+          <h3>目标会话怎么填</h3>
+          <p>三段式：<code>platform_id:message_type:session_id</code>，比如 <code>aiocqhttp:GroupMessage:123456</code>（群）或 <code>aiocqhttp:FriendMessage:888</code>（私聊）。「新建任务」表单里会列出最近活跃的会话，点一下就填上。</p>
+          <p class="dim">AI 建任务时不用填这个：默认当前会话，主人可以说「发到群 123456」让它带 target。</p>
+        </div>
+        <div class="help">
+          <h3>cron 表达式速查</h3>
+          <p><code>0 8 * * *</code> 每天 8:00 · <code>30 21 * * mon-fri</code> 工作日 21:30 · <code>0 10 1 * *</code> 每月 1 号 10:00 · <code>*/30 * * * *</code> 每 30 分钟</p>
+          <p class="dim">星期用英文缩写（mon/sat,sun）最稳；数字的话 0 和 7 都算周日。</p>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="mask" id="mask">
+  <div class="modal">
+    <h3 id="m-title">新建任务</h3>
+    <div class="msec">
+      <div class="st">基本信息<span>发给谁、叫什么</span></div>
+      <div class="frow"><label>任务名称</label><div class="fbody"><input type="text" id="f-name" maxlength="40" placeholder="早安"><div class="hint">短一点，记忆里会写成「你按定时任务「这里」发给…」</div></div></div>
+      <div class="frow"><label>目标会话</label><div class="fbody"><input type="text" id="f-session" list="session-list" placeholder="aiocqhttp:GroupMessage:123456"><datalist id="session-list"></datalist><div class="hint">点输入框可以从最近活跃会话里选；群 = GroupMessage，私聊 = FriendMessage</div></div></div>
+      <div class="frow"><label>时区</label><div class="fbody"><input type="text" id="f-tz" placeholder="留空 = 默认时区（如 Asia/Shanghai）"></div></div>
+    </div>
+    <div class="msec">
+      <div class="st">触发<span>什么时候发</span></div>
+      <div class="frow"><label>类型</label><div class="fbody radios">
+        <label><input type="radio" name="f-once" value="0" checked>循环</label>
+        <label><input type="radio" name="f-once" value="1">单次（发完自动删）</label>
+      </div></div>
+      <div class="frow" id="row-cron"><label>cron 表达式</label><div class="fbody">
+        <input type="text" id="f-cron" placeholder="0 8 * * *">
+        <div class="tmpl">
+          <button onclick="setCron('0 8 * * *')">每天 8:00</button>
+          <button onclick="setCron('30 21 * * mon-fri')">工作日 21:30</button>
+          <button onclick="setCron('0 10 * * sat,sun')">周末 10:00</button>
+          <button onclick="setCron('*/30 * * * *')">每 30 分钟</button>
+        </div>
+      </div></div>
+      <div class="frow" id="row-runat" style="display:none;"><label>执行时间</label><div class="fbody"><input type="datetime-local" id="f-runat"><div class="hint">到这个时间发一次，然后任务自动删掉</div></div></div>
+    </div>
+    <div class="msec">
+      <div class="st">内容<span>发什么</span></div>
+      <div class="frow"><label>模式</label><div class="fbody radios">
+        <label><input type="radio" name="f-mode" value="text" checked onchange="modeChanged()">固定文本</label>
+        <label><input type="radio" name="f-mode" value="ai" onchange="modeChanged()">AI 生成</label>
+      </div></div>
+      <div class="frow" id="row-text"><label>发送内容</label><div class="fbody"><textarea id="f-text" placeholder="早安呀~ 今天也要元气满满哦"></textarea></div></div>
+      <div class="frow" id="row-prompt" style="display:none;"><label>任务说明</label><div class="fbody"><textarea id="f-prompt" placeholder="向大家问个早，顺口提醒一句多喝水，两行以内"></textarea><div class="hint">AI 生成时会带上目标会话的人设，让它听起来还是平时那个它</div></div></div>
+    </div>
+    <div class="msec">
+      <div class="st">记忆与起因<span>被问起「为什么发这个」时靠它</span></div>
+      <div class="frow"><label>记进记忆</label><div class="fbody">
+        <div class="switch"><input type="checkbox" id="f-record" checked><i></i></div>
+        <div class="hint">开着 = 每次发送都带任务名和起因记进 sugarmemory，AI 跨会话记得自己发过什么。关掉就不记（或者退回 sugarmemory 的默认记录）。</div>
+      </div></div>
+      <div class="frow"><label>起因</label><div class="fbody"><input type="text" id="f-cause" maxlength="200" placeholder="为什么会有这个任务，一句话，比如：主人说每天早上要问早"><div class="hint">留空时：AI 建的任务自动带它当时听到的原话；面板建的会回退用「任务说明」兜底</div></div></div>
+    </div>
+    <div class="mfoot">
+      <button class="btn" onclick="closeEditor()">取消</button>
+      <button class="btn primary" id="m-save" onclick="saveJob()">保存</button>
+    </div>
+  </div>
+</div>
+<div class="mask" id="askMask">
+  <div class="modal askbox">
+    <h3 id="askTitle">确认一下</h3>
+    <div class="askdetail" id="askDetail"></div>
+    <div class="mfoot">
+      <button class="btn" id="askCancel">取消</button>
+      <button class="btn primary" id="askOk">确定</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const API = "/api/plug/astrbot_plugin_sugarcron/api";  // 直连用的绝对前缀
+const API_EP = "api";                                  // 桥接端点前缀（宿主会拼成 /api/v1/plugins/extensions/<插件名>/api/xxx）
+let JOBS = [], SESSIONS = [], CFG = [];
+let editingId = "";
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+/* ------------------------------------------------------------------ *
+ * 取数：框架把插件页面放在 sandbox iframe 里跑（origin = null），
+ * 页面内直接 fetch('/api/plug/...') 会被 CORS 挡掉（No 'Access-Control-Allow-Origin'），
+ * 表现就是「任务列表空白 + 总配置加载失败」。
+ * 正确姿势：用框架注入的 postMessage 桥 window.AstrBotPluginView，
+ * 由宿主页面带着自己的登录态代发请求（它会把 {status,data} 拆成 data 返回）。
+ * 桥不存在时（老版本框架 / 直接在浏览器打开本页面）退回直连。
+ * ------------------------------------------------------------------ */
+let _bridge;
+async function bridge() {
+  if (_bridge !== undefined) return _bridge;
+  for (let i = 0; i < 40; i++) {
+    const b = window.AstrBotPluginView || window.AstrBotPluginPage;
+    if (b) {
+      try { await Promise.race([b.ready(), new Promise(r => setTimeout(r, 1500))]); } catch (e) {}
+      _bridge = b;
+      return b;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  _bridge = null;
+  return null;
+}
+
+function withTimeout(p, ms, label) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label)), ms))]);
+}
+
+async function apiGet(path, params) {
+  const b = await bridge();
+  if (b) {
+    try {
+      return await withTimeout(b.apiGet(API_EP + path, params || {}), 25000, "请求超时（宿主没响应）");
+    } catch (e) {
+      if (e && e.message && !/fetch|network|Load failed|CORS|Failed to fetch/i.test(e.message)) throw e;
+    }
+  }
+  const qs = params ? "?" + new URLSearchParams(params) : "";
+  const r = await fetch(API + path + qs);
+  const j = await r.json();
+  if (j.status !== "ok") throw new Error(j.message || "请求失败");
+  return j.data;
+}
+
+async function apiPost(path, body) {
+  const b = await bridge();
+  if (b) {
+    try {
+      return await withTimeout(b.apiPost(API_EP + path, body || {}), 60000, "请求超时（宿主没响应）");
+    } catch (e) {
+      if (e && e.message && !/fetch|network|Load failed|CORS|Failed to fetch/i.test(e.message)) throw e;
+    }
+  }
+  const r = await fetch(API + path, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const j = await r.json();
+  if (j.status !== "ok") throw new Error(j.message || "请求失败");
+  return j.data;
+}
+
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("act");
+  clearTimeout(t._tm); t._tm = setTimeout(() => t.classList.remove("act"), 2600);
+}
+
+/* 沙箱里禁掉了 window.confirm（会直接返回 false，点了像没反应），自己画一个 */
+function askConfirm(title, detail) {
+  return new Promise((resolve) => {
+    const mask = $("#askMask");
+    $("#askTitle").textContent = title;
+    $("#askDetail").textContent = detail || "";
+    mask.classList.add("act");
+    const done = (ok) => {
+      mask.classList.remove("act");
+      $("#askOk").onclick = null;
+      $("#askCancel").onclick = null;
+      resolve(ok);
+    };
+    $("#askOk").onclick = () => done(true);
+    $("#askCancel").onclick = () => done(false);
+    mask.onclick = (e) => { if (e.target === mask) done(false); };
+  });
+}
+
+/* ---------- 导航 ---------- */
+document.querySelectorAll(".navitem").forEach(el => {
+  el.onclick = () => {
+    document.querySelectorAll(".navitem").forEach(x => x.classList.remove("act"));
+    el.classList.add("act");
+    document.querySelectorAll(".pane").forEach(x => x.classList.remove("act"));
+    $("#pane-" + el.dataset.pane).classList.add("act");
+    const titles = {jobs:["任务列表","到点自动发，发完记进记忆"], runs:["运行记录","每次执行都记一条"],
+      config:["总配置","发送 / 记忆联动 / 工具 / 杂项"], help:["说明","这插件为什么存在、怎么用"]};
+    $("#pane-title").textContent = titles[el.dataset.pane][0];
+    $("#pane-meta").textContent = titles[el.dataset.pane][1];
+    $("#head-tools").style.display = el.dataset.pane === "jobs" ? "flex" : "none";
+    if (el.dataset.pane === "config") loadCfg();
+    if (el.dataset.pane === "runs") loadRuns();
+  };
+});
+
+/* ---------- 任务列表 ---------- */
+async function loadJobs() {
+  try {
+    const d = await apiGet("/jobs");
+    JOBS = d.jobs || [];
+    $("#stat").innerHTML = `共 <b>${JOBS.length}</b> 个任务，启用 <b>${d.enabled}</b> 个`;
+    $("#nav-jobs").textContent = JOBS.length || "";
+    const box = $("#joblist");
+    if (!JOBS.length) { box.innerHTML = `<div class="empty">还没有任务。点右上角「＋ 新建任务」，或者直接在聊天里跟我说。
+      <div style="font-size:11px;margin-top:8px;opacity:.8;">单次任务跑完会自动删掉，去「运行记录」里还能看到那一枪；循环任务会一直留在这。</div></div>`; return; }
+    box.innerHTML = JOBS.map(j => `
+      <div class="job ${j.enabled ? "" : "off"}">
+        <div class="jtop">
+          <span class="jname">${esc(j.name)}</span>
+          <span class="chip ${j.mode === "ai" ? "mode-ai" : "mode-text"}">${j.mode === "ai" ? "AI 生成" : "固定文本"}</span>
+          ${j.run_once ? `<span class="chip once">单次</span>` : ""}
+          <span class="chip ${j.enabled ? "on" : "offc"}">${j.enabled ? "启用" : "停用"}</span>
+          ${j.record ? `<span class="chip mem">记忆✓</span>` : ""}
+          <span class="jacts">
+            <button class="btn mini" onclick="runJob('${j.id}')">立即运行</button>
+            <button class="btn mini" onclick="openEditor('${j.id}')">编辑</button>
+            <button class="btn mini" onclick="toggleJob('${j.id}', ${!j.enabled})">${j.enabled ? "停用" : "启用"}</button>
+            <button class="btn mini danger" onclick="delJob('${j.id}', '${esc(j.name)}')">删除</button>
+          </span>
+        </div>
+        <div class="jmeta">
+          ⏰ <b>${j.run_once ? esc((j.run_at || "").replace("T", " ")) : esc(j.cron_human || j.cron)}</b>${j.run_once ? "" : `（${esc(j.cron)}）`} · 下次 <b>${esc(j.next_run || "—")}</b><br>
+          🎯 发往 <b>${esc(j.session_label)}</b> <span style="opacity:.75;">${esc(j.session)}</span>
+        </div>
+        <div class="jbody">${esc(j.mode === "ai" ? "说明：" + (j.prompt || "") : j.text || "")}</div>
+        ${j.cause ? `<div class="jcause">起因：<em>${esc(j.cause)}</em></div>` : ""}
+        ${j.last_status === "failed" ? `<div class="jerr">上次执行失败：${esc(j.last_error || "")}</div>` : ""}
+      </div>`).join("");
+  } catch (e) { $("#stat").textContent = "加载失败：" + e.message; }
+}
+
+async function loadSessions() {
+  try {
+    const d = await apiGet("/sessions");
+    SESSIONS = d.items || [];
+    $("#session-list").innerHTML = SESSIONS.map(s =>
+      `<option value="${esc(s.session)}">${esc(s.label)}（${s.n} 条动态）</option>`).join("");
+  } catch (e) { /* 会话候选只是辅助，失败不打扰 */ }
+}
+
+async function runJob(id) {
+  if (!await askConfirm("立刻运行一次？", "会马上往目标会话发一条，不等预定时间。")) return;
+  try {
+    const d = await apiPost("/job/run", {id});
+    if (d.status === "ok") { toast("已发送到目标会话"); loadJobs(); loadRuns(); }
+    else toast("失败：" + (d.error || "未知"));
+  } catch (e) { toast(e.message); }
+}
+async function toggleJob(id, enabled) {
+  try { await apiPost("/job/toggle", {id, enabled}); loadJobs(); }
+  catch (e) { toast(e.message); }
+}
+async function delJob(id, name) {
+  if (!await askConfirm("删掉任务「" + name + "」？", "删了就没了，运行记录里还会留着历史。")) return;
+  try { await apiPost("/job/delete", {id}); toast("已删除"); loadJobs(); }
+  catch (e) { toast(e.message); }
+}
+
+/* ---------- 编辑器 ---------- */
+function setCron(v) { $("#f-cron").value = v; }
+function modeChanged() {
+  const ai = document.querySelector('input[name=f-mode]:checked').value === "ai";
+  $("#row-text").style.display = ai ? "none" : "flex";
+  $("#row-prompt").style.display = ai ? "flex" : "none";
+}
+document.querySelectorAll('input[name=f-once]').forEach(r => r.onchange = () => {
+  const once = document.querySelector('input[name=f-once]:checked').value === "1";
+  $("#row-cron").style.display = once ? "none" : "flex";
+  $("#row-runat").style.display = once ? "flex" : "none";
+});
+function openEditor(id) {
+  editingId = id || "";
+  $("#m-title").textContent = id ? "编辑任务" : "新建任务";
+  const j = JOBS.find(x => x.id === id) || {};
+  $("#f-name").value = j.name || "";
+  $("#f-session").value = j.session || "";
+  $("#f-tz").value = j.timezone || "";
+  const once = !!j.run_once;
+  document.querySelector(`input[name=f-once][value="${once ? 1 : 0}"]`).checked = true;
+  $("#row-cron").style.display = once ? "none" : "flex";
+  $("#row-runat").style.display = once ? "flex" : "none";
+  $("#f-cron").value = j.cron || "";
+  $("#f-runat").value = (j.run_at || "").slice(0, 16);
+  const mode = j.mode || "text";
+  document.querySelector(`input[name=f-mode][value="${mode}"]`).checked = true;
+  modeChanged();
+  $("#f-text").value = j.text || "";
+  $("#f-prompt").value = j.prompt || "";
+  $("#f-record").checked = j.id ? !!j.record : true;
+  $("#f-cause").value = j.cause || "";
+  $("#mask").classList.add("act");
+}
+function closeEditor() { $("#mask").classList.remove("act"); }
+$("#mask").addEventListener("click", e => { if (e.target === e.currentTarget) closeEditor(); });
+
+async function saveJob() {
+  const once = document.querySelector('input[name=f-once]:checked').value === "1";
+  const mode = document.querySelector('input[name=f-mode]:checked').value;
+  const body = {
+    id: editingId || undefined,
+    name: $("#f-name").value.trim(),
+    session: $("#f-session").value.trim(),
+    timezone: $("#f-tz").value.trim(),
+    run_once: once,
+    cron: once ? "" : $("#f-cron").value.trim(),
+    run_at: once ? $("#f-runat").value : "",
+    mode,
+    text: $("#f-text").value.trim(),
+    prompt: $("#f-prompt").value.trim(),
+    record: $("#f-record").checked,
+    cause: $("#f-cause").value.trim(),
+  };
+  if (!editingId) body.enabled = true;  // 新建默认启用；编辑不动启用状态（卡片上的启停按钮管这个）
+  if (!body.name) return toast("任务名称不能为空");
+  if (!body.session) return toast("目标会话不能为空");
+  if (!once && !body.cron) return toast("循环任务要填 cron 表达式");
+  if (once && !body.run_at) return toast("单次任务要选执行时间");
+  if (mode === "text" && !body.text) return toast("固定文本模式要填发送内容");
+  if (mode === "ai" && !body.prompt) return toast("AI 生成模式要填任务说明");
+  try {
+    const d = await apiPost("/job/save", body);
+    toast((d.action === "更新" ? "已更新" : "已新建") + "，下次 " + (d.job.next_run || "待触发"));
+    closeEditor(); loadJobs();
+  } catch (e) { toast(e.message); }
+}
+
+/* ---------- 运行记录 ---------- */
+async function loadRuns() {
+  try {
+    const d = await apiGet("/runs");
+    const runs = d.runs || [];
+    $("#nav-runs").textContent = runs.length || "";
+    const box = $("#runlist");
+    if (!runs.length) { box.innerHTML = `<div class="empty">还没有运行记录。任务到点（或手动试跑）之后这里就有了。</div>`; return; }
+    box.innerHTML = runs.map(r => `
+      <div class="run">
+        <span class="time">${esc(r.ts)}</span>
+        <span class="chip ${r.status === "ok" ? "okc" : "failc"}">${r.status === "ok" ? "成功" : "失败"}</span>
+        ${r.manual ? `<span class="chip manual">手动</span>` : ""}
+        <div class="body"><span class="who">「${esc(r.name)}」→ ${esc(r.session ? (r.session.split(":").pop()) : "")}</span>
+          ${r.snippet ? `<div>${esc(r.snippet)}</div>` : ""}
+          ${r.error ? `<div class="err">${esc(r.error)}</div>` : ""}
+        </div>
+      </div>`).join("");
+  } catch (e) { $("#runlist").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+}
+
+/* ---------- 总配置 ---------- */
+async function loadCfg() {
+  try {
+    const d = await apiGet("/config");
+    CFG = d.items || [];
+    const groups = [];
+    CFG.forEach(it => {
+      let g = groups.find(x => x.key === it.group);
+      if (!g) { g = {key: it.group, hint: it.group_hint, items: []}; groups.push(g); }
+      g.items.push(it);
+    });
+    $("#cfglist").innerHTML = groups.map(g => `
+      <div class="cfggroup">
+        <h3>${esc(gname(g.key))}</h3>
+        <div class="gh">${esc(g.hint || "")}</div>
+        ${g.items.map(it => `
+          <div class="cfgrow">
+            <label>${esc(it.label)}</label>
+            <div class="cbody">
+              ${it.type === "bool"
+                ? `<div class="switch"><input type="checkbox" data-cfg="${it.key}" ${it.value ? "checked" : ""}><i></i></div>`
+                : it.key === "ai_extra_prompt"
+                  ? `<textarea data-cfg="${it.key}">${esc(it.value)}</textarea>`
+                  : `<input type="${it.type === "int" ? "number" : "text"}" data-cfg="${it.key}" value="${esc(it.value)}">`}
+              <div class="hint">${esc(it.hint)}</div>
+            </div>
+          </div>`).join("")}
+      </div>`).join("");
+  } catch (e) { $("#cfglist").innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; }
+}
+function gname(key) { return ({send:"发送", memory:"记忆联动", tool:"给 AI 的工具", misc:"杂项"})[key] || key; }
+async function saveCfg() {
+  const patch = {};
+  document.querySelectorAll("[data-cfg]").forEach(el => {
+    patch[el.dataset.cfg] = el.type === "checkbox" ? el.checked : (el.type === "number" ? Number(el.value || 0) : el.value);
+  });
+  try {
+    await apiPost("/config/set", {config: patch});
+    toast("已保存，立刻生效");
+  } catch (e) { toast(e.message); }
+}
+
+function refreshAll() { loadJobs(); loadSessions(); if ($("#pane-runs").classList.contains("act")) loadRuns(); }
+refreshAll();
+setInterval(loadJobs, 60000);
+</script>
+</body>
+</html>

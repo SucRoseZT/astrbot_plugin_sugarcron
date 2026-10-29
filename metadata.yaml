@@ -1,0 +1,6 @@
+name: astrbot_plugin_sugarcron
+display_name: "蔗糖的定时任务~"
+desc: 重写自带的定时任务：到点发固定文本或让 AI 现写一段，发完带着「任务名+起因」记进 sugarmemory，AI 跨会话被问「你为什么发这个」答得上来。带 WebUI 面板（任务管理/运行记录/总配置）、五个 AI 工具（建/列/删/启停/试跑）、/定时任务 指令
+version: 0.1.0
+author: SucRoseZT
+repo: local

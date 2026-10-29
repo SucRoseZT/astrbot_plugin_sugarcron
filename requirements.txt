@@ -1,0 +1,1 @@
+# 本插件无额外依赖：apscheduler 由 AstrBot 自带，sugarmemory 联动走属性标记不需要 import

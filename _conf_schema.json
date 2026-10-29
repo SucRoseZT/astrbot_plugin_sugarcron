@@ -1,0 +1,97 @@
+{
+  "_webui_notice": {
+    "description": "⚠️ 先读我：配置请尽量在面板里改",
+    "type": "string",
+    "hint": "本插件的日常操作都在它自己的面板里：AstrBot WebUI → 插件 → 蔗糖的定时任务~ → 打开面板。建任务、启停、试跑、看运行记录都在那里，改总配置也是面板里改完立刻生效，不用重载插件。\n\n这边只当兜底：面板打不开的时候才在这边改，改完要保存并重载插件。\n\n（本项是说明，不是配置，不用填，忽略即可。）",
+    "default": "",
+    "obvious_hint": true
+  },
+  "send": {
+    "description": "发送",
+    "type": "object",
+    "hint": "到点之后怎么把话说出去：AI 生成用什么模型、等多久。固定文本模式不受这里影响。",
+    "items": {
+      "ai_provider_id": {
+        "description": "AI 生成用的模型",
+        "type": "string",
+        "hint": "AI 生成模式的任务到点时用哪个模型写正文。留空 = 目标会话当前正在用的模型，填 Provider ID 可以给定时消息单独挂个便宜模型",
+        "default": ""
+      },
+      "ai_timeout_seconds": {
+        "description": "AI 生成超时（秒）",
+        "type": "int",
+        "hint": "等模型写正文最多等多久，超时这次就不发（会记进运行记录）。推理型模型建议给足 120",
+        "default": 120
+      },
+      "ai_extra_prompt": {
+        "description": "全局附加提示词",
+        "type": "string",
+        "hint": "AI 生成时拼在人设后面的一句话，比如「定时消息别超过两行」。留空 = 不加",
+        "default": ""
+      }
+    }
+  },
+  "memory": {
+    "description": "记忆联动",
+    "type": "object",
+    "hint": "和蔗糖的记忆中枢（sugarmemory）怎么配合。这是本插件存在的意义：让 AI 记得自己发过什么、为什么发。",
+    "items": {
+      "memory_link": {
+        "description": "记忆标记",
+        "type": "bool",
+        "hint": "开着才会给每条定时消息打 sugarmemory 标记：记录开头写「你按定时任务「xxx」发给…」，起因带任务创建时的原话，AI 被问「你为什么发这个」答得上来。关掉就退回 sugarmemory 的默认记录（只有内容没有起因，而且受它那边「其他主动发送也要记」开关管）",
+        "default": true
+      },
+      "memory_cause_max": {
+        "description": "起因最长字数",
+        "type": "int",
+        "hint": "「为什么发这个」最多记多少字。sugarmemory 那边整条记忆上限 300 字，这里超了会截断",
+        "default": 90
+      }
+    }
+  },
+  "tool": {
+    "description": "给 AI 的工具",
+    "type": "object",
+    "hint": "谁能让 AI 建任务、一个会话最多建几个。防的是群里路人乱塞定时任务。",
+    "items": {
+      "tool_add": {
+        "description": "允许 AI 建任务",
+        "type": "bool",
+        "hint": "关掉后 sugar_cron_add 会从 AI 的工具列表里消失，只能看、删、启停；建任务去面板或 /定时任务 指令",
+        "default": true
+      },
+      "tool_admin_only": {
+        "description": "建任务只限主人",
+        "type": "bool",
+        "hint": "开启后只有主人能让 AI 建任务。默认关：谁都能建，但普通人只能发到自己当前会话，而且受「每会话任务上限」拦着",
+        "default": false
+      },
+      "tool_max_per_session": {
+        "description": "每会话任务上限",
+        "type": "int",
+        "hint": "同一个会话（按创建来源算）最多能建几个任务，防刷爆调度器。0 = 不限",
+        "default": 20
+      }
+    }
+  },
+  "misc": {
+    "description": "杂项",
+    "type": "object",
+    "hint": "日志条数、默认时区这类边角料。",
+    "items": {
+      "log_keep": {
+        "description": "运行记录保留条数",
+        "type": "int",
+        "hint": "面板「运行记录」里最多留多少条，旧的自动丢",
+        "default": 200
+      },
+      "default_timezone": {
+        "description": "默认时区",
+        "type": "string",
+        "hint": "任务没单独填时区时用这个，比如 Asia/Shanghai。留空 = 系统时区",
+        "default": ""
+      }
+    }
+  }
+}
