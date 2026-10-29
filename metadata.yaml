@@ -5,4 +5,7 @@ version: 0.1.0
 author: SucRoseZT
 repo: https://github.com/SucRoseZT/astrbot_plugin_sugarcron
 tags:
-  - astrbot
+  - cron
+  - scheduled-task
+  - task
+  - webui
