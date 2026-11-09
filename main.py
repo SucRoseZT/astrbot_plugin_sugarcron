@@ -8,7 +8,9 @@ AstrBot 插件：蔗糖的定时任务~（SugarCron）
 「读不到」：换个会话被问「你为什么发这个」，它不记得——因为动机（任务说明）
 没有跟着记录走。本插件把这件事做成闭环：
 
-1. 到点发送固定文本，或按任务说明 + 目标会话人设让模型生成一段正文；
+1. 到点发送固定文本，或按任务说明 + 目标会话人设让模型生成一段正文（旧模式，
+   到点只发一条）；或把一条触发提示词喂给模型、让它按正常对话链路回复一整串
+   （新模式「真实的分段回复」，回复交给分段插件拆成一连串消息）；
 2. 发送统一走 `context.send_message`，蔗糖的记忆中枢（sugarmemory）挂在那里的
    壳会照常记一条「bot_outbound」；
 3. 发送前在 message_chain 上打 `_sugarmemory_relay` 显式标记，里面带
@@ -47,10 +49,77 @@ from quart import send_file
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import At, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
+
+# 「真实的分段回复」要用到内核里的合成事件 / 主 Agent 构建器 / 钩子分发。
+# 这些是内核内部 API，不同版本可能挪位置：整包 try 住，缺了就自动降级到
+# 「完整消息管道」链路（那条只依赖 get_event_queue，最稳）。
+try:
+    from astrbot.core.cron.events import CronMessageEvent
+    from astrbot.core.message.message_event_result import (
+        MessageEventResult,
+        ResultContentType,
+    )
+    from astrbot.core.provider.entities import ProviderRequest
+    from astrbot.core.pipeline.context_utils import call_event_hook
+    from astrbot.core.star.star_handler import EventType
+
+    CORE_PIPELINE_OK = True
+except Exception as _pipeline_import_err:  # noqa: BLE001
+    CORE_PIPELINE_OK = False
+    CronMessageEvent = None
+    logger.warning(f"[SugarCron] 内核合成事件接口不可用，真实的分段回复不可用：{_pipeline_import_err}")
+
+try:
+    # 只用来把问候风格挂到 user 内容上（不再写 system_prompt）。老内核没有这个
+    # 类就退回「本轮没有风格约束」，不影响问候本身能不能发出去。
+    from astrbot.core.agent.message import TextPart
+except Exception:  # noqa: BLE001
+    TextPart = None
+    logger.warning("[SugarCron] 内核不提供 TextPart，问候轮将没有风格约束")
+
+try:
+    from astrbot.core.astr_main_agent import (
+        MainAgentBuildConfig,
+        _get_session_conv,
+        build_main_agent,
+    )
+    from astrbot.core.agent.runners.base import AgentState
+
+    CORE_AGENT_OK = CORE_PIPELINE_OK
+except Exception as _agent_import_err:  # noqa: BLE001
+    CORE_AGENT_OK = False
+    logger.warning(f"[SugarCron] 内核主 Agent 接口不可用，触发链路只能选 pipeline：{_agent_import_err}")
+
+
+if CronMessageEvent is not None:
+    class SugarCronGreetingEvent(CronMessageEvent):
+        """定时问候用的合成事件。
+
+        比内核自带的 CronMessageEvent 多做一件事：每条从这条事件发出去的消息链
+        都打上 `_sugarmemory_relay`，让 sugarmemory 记成「你按定时任务「xx」发给…」，
+        跟旧的「到点发一条」保持同一套记忆标记。
+        """
+
+        def __init__(self, *args, relay_tag: dict | None = None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._sugarcron_tag = relay_tag
+
+        async def send(self, message: MessageChain) -> None:
+            if message is None:
+                return
+            if self._sugarcron_tag:
+                try:
+                    message._sugarmemory_relay = dict(self._sugarcron_tag)
+                except Exception:
+                    pass
+            await super().send(message)
+else:
+    SugarCronGreetingEvent = None
+
 
 PLUGIN_NAME = "astrbot_plugin_sugarcron"
 PANEL_PREFIX = f"{PLUGIN_NAME}/panel"
@@ -95,8 +164,12 @@ def _norm_weekday(field: str) -> str:
 # 配置分组：schema key、显示名、这一组是干什么的（跟 sugarmemory 同一套写法） #
 # ---------------------------------------------------------------------- #
 CFG_GROUPS = [
+    ("mode", "模式开关",
+     "两套东西各自的电闸：老的「单条定时」和新的「真实的分段回复」可以单独开/关。关掉只是跳过、任务不删，重新打开立刻恢复。"),
+    ("greeting", "真实的分段回复",
+     "定时把一条提示词喂给模型，让它按正常对话链路回复；回复交给分段插件拆成一连串消息。两种触发链路可切换。"),
     ("send", "发送",
-     "到点之后怎么把话说出去：AI 生成用什么模型、等多久。固定文本模式不受这里影响。"),
+     "到点之后怎么把话说出去：一坨的回复用什么模型、等多久。固定文本模式不受这里影响。"),
     ("memory", "记忆联动",
      "和蔗糖的记忆中枢（sugarmemory）怎么配合。这是本插件存在的意义：让 AI 记得自己发过什么、为什么发。"),
     ("tool", "给 AI 的工具",
@@ -105,15 +178,53 @@ CFG_GROUPS = [
      "日志条数、默认时区这类边角料。"),
 ]
 
+GREETING_STYLE_DEFAULT = (
+    "这是一次由定时任务触发的主动问候，不是用户在跟你聊天。请直接对目标对象说话，"
+    "用你平时的人设和语气，把要说的写成 2~5 句自然口语的小句子，句间用句号、问号、"
+    "感叹号或换行分开，好让分段插件把它拆成一连串短消息发出去；不要写成一整段，"
+    "不要加「定时任务」之类的说明，不要复述这条提示词，除非确实需要否则不要调用工具，"
+    "不要输出解释或总结。"
+)
+
 CFG_ITEMS = [
+    # ---- 模式开关 ----
+    ("legacy_enabled", "启用单条定时（旧模式）", "bool", "mode",
+     "固定文本 / 一坨的回复这两种「到点只发一条」的任务还跑不跑。关掉后这些任务保留在列表里、"
+     "到点记一条「已跳过」，也不让新建；重新打开立刻恢复"),
+    ("greeting_enabled", "启用真实的分段回复（新模式）", "bool", "mode",
+     "真实的分段回复任务还跑不跑。关掉后同样只跳过不删除、不让新建，重新打开立刻恢复"),
+
+    # ---- 真实的分段回复 ----
+    ("greeting_route", "触发链路", "string", "greeting",
+     "pipeline = 合成一条消息推进 AstrBot 完整管道（人设/记忆/分段/TTS 等所有插件照常参与，最真实）；"
+     "agent = 直接唤醒主 Agent 跑一次，再手动过发送前钩子（不受唤醒/白名单等其它插件干扰）。"
+     "填 pipeline 或 agent；任务里也能单独覆盖"),
+    ("greeting_trigger_template", "提示词模板", "string", "greeting",
+     "到点实际喂给模型的那句话。占位符：{content}=任务的触发内容，{name}=任务名，"
+     "{target}=称呼（留空用会话标签），{session}=目标会话，{time}=当前时间，{date}=当前日期"),
+    ("greeting_system_prompt", "附加风格提示词", "string", "greeting",
+     "挂在本轮用户内容上的风格要求，只对这次请求生效、不写会话历史。不再写 system_prompt："
+     "那一句会占住整条 system 的第一行，把后面 5k 人设/记忆的前缀缓存整段废掉（问候轮 cached=0）。"
+     "默认让模型把回复写成便于分段的一连串短句。清空 = 不加"),
+    ("greeting_timeout_seconds", "单次超时（秒）", "int", "greeting",
+     "agent 链路里等模型把整段问候写完最多等多久；pipeline 链路是投递后由管道自己跑，不受这个限制"),
+    ("greeting_max_steps", "Agent 最大步数", "int", "greeting",
+     "agent 链路里工具循环最多走几步，防止模型反复调工具不收尾"),
+    ("greeting_llm_hooks", "跑请求钩子", "bool", "greeting",
+     "agent 链路里手动触发 on_llm_request（sugarmemory 之类的记忆注入靠它）。pipeline 链路本来就走全套，不受这里影响"),
+    ("greeting_result_hooks", "跑发送前钩子（分段）", "bool", "greeting",
+     "agent 链路里手动触发 on_decorating_result：分段、表情、TTS 等插件靠它把整段回复拆成一连串消息。强烈建议开着"),
+    ("greeting_save_history", "写回会话历史", "bool", "greeting",
+     "agent 链路跑完把这次触发和回复写进目标会话的对话历史，AI 之后能接得上；pipeline 链路框架自己会写"),
+
     # ---- 发送 ----
-    ("ai_provider_id", "AI 生成用的模型", "string", "send",
-     "AI 生成模式的任务到点时用哪个模型写正文。留空 = 目标会话当前正在用的模型，"
+    ("ai_provider_id", "一坨的回复用的模型", "string", "send",
+     "一坨的回复模式的任务到点时用哪个模型写正文。留空 = 目标会话当前正在用的模型，"
      "填 Provider ID 可以给定时消息单独挂个便宜模型"),
-    ("ai_timeout_seconds", "AI 生成超时（秒）", "int", "send",
+    ("ai_timeout_seconds", "一坨的回复超时（秒）", "int", "send",
      "等模型写正文最多等多久，超时这次就不发（会记进运行记录）。推理型模型建议给足 120"),
     ("ai_extra_prompt", "全局附加提示词", "string", "send",
-     "AI 生成时拼在人设后面的一句话，比如「定时消息别超过两行」。留空 = 不加"),
+     "一坨的回复时拼在人设后面的一句话，比如「定时消息别超过两行」。留空 = 不加"),
 
     # ---- 记忆联动 ----
     ("memory_link", "记忆标记", "bool", "memory",
@@ -140,6 +251,16 @@ CFG_ITEMS = [
 
 CFG_GROUP_OF = {key: group for key, _l, _t, group, _h in CFG_ITEMS}
 CFG_DEFAULTS = {
+    "legacy_enabled": True,
+    "greeting_enabled": True,
+    "greeting_route": "pipeline",
+    "greeting_trigger_template": "已触发定时任务，内容为{content}",
+    "greeting_system_prompt": GREETING_STYLE_DEFAULT,
+    "greeting_timeout_seconds": 180,
+    "greeting_max_steps": 20,
+    "greeting_llm_hooks": True,
+    "greeting_result_hooks": True,
+    "greeting_save_history": True,
     "ai_provider_id": "",
     "ai_timeout_seconds": 120,
     "ai_extra_prompt": "",
@@ -220,7 +341,7 @@ def _cron_human(expr: str) -> str:
     return expr
 
 
-@register("sugarcron", "sugarcane", "蔗糖的定时任务~", "0.1.0")
+@register("sugarcron", "sugarcane", "蔗糖的定时任务~", "0.2.0")
 class SugarCron(Star):
     def __init__(self, context: Context, config: AstrBotConfig | dict | None = None):
         super().__init__(context, config)
@@ -370,7 +491,7 @@ class SugarCron(Star):
     def _job_cause(self, job: dict) -> str:
         """「为什么发这个」：创建时的原话优先，没有就用任务说明 / 固定内容兜底。"""
         cause = str(job.get("cause") or "").strip()
-        if not cause and job.get("mode") == "ai":
+        if not cause and job.get("mode") in ("ai", "agent"):
             cause = f"任务说明：{job.get('prompt', '')}"
         if not cause:
             cause = "固定文本任务"
@@ -433,8 +554,8 @@ class SugarCron(Star):
         job["session"] = session
 
         mode = str(data.get("mode", existing.get("mode") if existing else "text") or "text").strip()
-        if mode not in ("text", "ai"):
-            raise ValueError("mode 只能是 text（固定文本）或 ai（AI 生成）")
+        if mode not in ("text", "ai", "agent"):
+            raise ValueError("mode 只能是 text（固定文本）、ai（一坨的回复）或 agent（真实的分段回复）")
         job["mode"] = mode
 
         job["text"] = str(data.get("text", existing.get("text", "") if existing else "") or "").strip()
@@ -442,7 +563,18 @@ class SugarCron(Star):
         if mode == "text" and not job["text"]:
             raise ValueError("固定文本模式要填要发的内容")
         if mode == "ai" and not job["prompt"]:
-            raise ValueError("AI 生成模式要填任务说明（让它知道到点该说什么）")
+            raise ValueError("一坨的回复模式要填任务说明（让它知道到点该说什么）")
+        if mode == "agent" and not job["prompt"]:
+            raise ValueError("真实的分段回复模式要填触发内容（例如：给某某用户发送早安问好）")
+
+        # 真实的分段回复专属：称呼与链路覆盖。旧模式也保留这两个字段，不影响行为。
+        job["target_name"] = str(
+            data.get("target_name", existing.get("target_name", "") if existing else "") or ""
+        ).strip()[:60]
+        route = str(data.get("route", existing.get("route", "") if existing else "") or "").strip().lower()
+        if route not in ("", "pipeline", "agent"):
+            raise ValueError("route 只能是留空（跟随总配置）、pipeline 或 agent")
+        job["route"] = route
 
         run_once = bool(data.get("run_once", existing.get("run_once", False) if existing else False))
         job["run_once"] = run_once
@@ -533,29 +665,50 @@ class SugarCron(Star):
         return v
 
     # -------------------------------------------------------------- #
-    # 到点执行：生成 → 打标记 → 发送 → 记录                              #
+    # 到点执行：旧模式发一条 / 新模式喂提示词 → 记录                       #
     # -------------------------------------------------------------- #
     async def _fire(self, job_id: str, manual: bool = False):
         job = self._jobs.get(job_id)
         if not job or (not job.get("enabled") and not manual):
             return
-        status, error, text = "ok", "", ""
+        status, error, text, route = "ok", "", "", ""
+        mode = str(job.get("mode") or "text")
         try:
-            if job.get("mode") == "ai":
-                text = await self._ai_text(job)
+            if not self._mode_enabled(mode):
+                key = "greeting_enabled" if mode == "agent" else "legacy_enabled"
+                status = "skipped"
+                error = f"总开关 {key} 已关闭，本次跳过（任务保留，打开后自动恢复）"
+                logger.info(f"[SugarCron] 任务「{job.get('name')}」{error}")
+            elif mode == "agent":
+                if not CORE_PIPELINE_OK:
+                    raise RuntimeError("当前 AstrBot 内核不提供合成事件接口，真实的分段回复不可用")
+                route = self._greeting_route(job)
+                if route == "agent" and not CORE_AGENT_OK:
+                    logger.warning("[SugarCron] agent 链路不可用，本次自动退回 pipeline")
+                    route = "pipeline"
+                prompt = self._greeting_prompt(job)
+                text = f"[提示词] {prompt}"
+                if route == "agent":
+                    await self._greeting_agent(job, prompt)
+                else:
+                    await self._greeting_pipeline(job, prompt)
             else:
-                text = job.get("text", "")
-            if not text:
-                raise RuntimeError("要发送的内容是空的")
-            chain = MessageChain(chain=[Plain(text)])
-            if job.get("record", True) and self._cfg("memory_link", True):
-                # 显式标记：sugarmemory 照它记「你按定时任务「xx」发给…｜起因：…」，
-                # AI 跨会话被问「为什么发这个」就答得上来。
-                chain._sugarmemory_relay = self._memory_tag(job)
-            session = MessageSession.from_str(job["session"])
-            result = await self.context.send_message(session=session, message_chain=chain)
-            if result is False:
-                raise RuntimeError("平台未找到或目标不存在")
+                # 旧模式：到点只发一条，原逻辑一点没动。
+                if mode == "ai":
+                    text = await self._ai_text(job)
+                else:
+                    text = job.get("text", "")
+                if not text:
+                    raise RuntimeError("要发送的内容是空的")
+                chain = MessageChain(chain=[Plain(text)])
+                if job.get("record", True) and self._cfg("memory_link", True):
+                    # 显式标记：sugarmemory 照它记「你按定时任务「xx」发给…｜起因：…」，
+                    # AI 跨会话被问「为什么发这个」就答得上来。
+                    chain._sugarmemory_relay = self._memory_tag(job)
+                session = MessageSession.from_str(job["session"])
+                result = await self.context.send_message(session=session, message_chain=chain)
+                if result is False:
+                    raise RuntimeError("平台未找到或目标不存在")
         except Exception as e:  # noqa: BLE001
             status, error = "failed", f"{type(e).__name__}: {e}"
             logger.warning(f"[SugarCron] 任务「{job.get('name')}」执行失败：{error}")
@@ -565,7 +718,7 @@ class SugarCron(Star):
         job["last_error"] = error
         self._runs.append({
             "ts": _now_str(), "job_id": job_id, "name": job.get("name", "?"),
-            "mode": job.get("mode"), "status": status,
+            "mode": mode, "status": status, "route": route,
             "snippet": text[:120], "error": error,
             "session": job.get("session", ""), "manual": manual,
         })
@@ -574,6 +727,257 @@ class SugarCron(Star):
             self._remove_job(job_id, persist=True)
         else:
             self._save_jobs()
+
+    # -------------------------------------------------------------- #
+    # 真实的分段回复：一条提示词 → 模型按正常对话链路回复 → 交给分段插件拆串       #
+    # -------------------------------------------------------------- #
+    def _greeting_route(self, job: dict) -> str:
+        route = str(
+            job.get("route") or self._cfg("greeting_route", "pipeline") or "pipeline"
+        ).strip().lower()
+        return route if route in ("pipeline", "agent") else "pipeline"
+
+    def _greeting_prompt(self, job: dict) -> str:
+        """把任务的「触发内容」套进模板，例如：已触发定时任务，内容为给某某用户发送早安问好。"""
+        content = str(job.get("prompt") or "").strip()
+        if not content:
+            content = str(job.get("text") or "").strip() or f"给{_session_label(job.get('session'))}问个好"
+        now = datetime.now()
+        values = {
+            "content": content,
+            "name": str(job.get("name") or "定时任务"),
+            "target": str(job.get("target_name") or "").strip() or _session_label(job.get("session")),
+            "session": str(job.get("session") or ""),
+            "time": now.strftime("%H:%M"),
+            "date": now.strftime("%Y-%m-%d"),
+        }
+        tpl = str(self._cfg("greeting_trigger_template", "") or "").strip()
+        if not tpl:
+            tpl = "已触发定时任务，内容为{content}"
+        try:
+            return tpl.format(**values).strip()
+        except Exception:
+            return f"已触发定时任务，内容为{content}"
+
+    def _greeting_style(self) -> str:
+        return str(self._cfg("greeting_system_prompt", GREETING_STYLE_DEFAULT) or "").strip()
+
+    def _attach_greeting_style(self, req) -> None:
+        """把风格要求挂到本轮「用户内容」上，绝不写 system_prompt。
+
+        以前是 ProviderRequest(system_prompt=风格词)：那一句会占住整条 system 的
+        第一行，框架随后才把 5k 人设 / 记忆追在它后面，provider 从第一个
+        64-token 块起就整段不命中——问候轮 cached=0，下一轮换回正常 system
+        再废一次。挂到 extra_user_content_parts 后 system 与正常聊天轮逐字节
+        一致，前缀能整段复用。
+
+        用 mark_as_temp() 标成「只给 provider 看」：不进会话历史。也不动
+        req.prompt——知识库检索（astr_main_agent._apply_kb）和 sugarmemory 的
+        召回 query 都读它，改它等于顺手污染召回。
+        """
+        style = self._greeting_style()
+        if not style or TextPart is None:
+            return
+        try:
+            req.extra_user_content_parts.append(
+                TextPart(text=style).mark_as_temp())
+        except Exception as e:  # noqa: BLE001
+            # 挂不上也不能拦住问候本身：退回旧行为（没有风格约束）也比不发好。
+            logger.warning(f"[SugarCron] 挂风格提示失败，本轮无风格约束：{e}")
+
+    def _greeting_tag(self, job: dict):
+        if not (job.get("record", True) and self._cfg("memory_link", True)):
+            return None
+        return self._memory_tag(job)
+
+    def _make_greeting_event(self, job: dict, prompt: str):
+        """合成一条「系统发来的消息」，目标会话就是任务里填的会话。"""
+        if SugarCronGreetingEvent is None:
+            raise RuntimeError("内核不提供 CronMessageEvent，真实的分段回复不可用")
+        session = MessageSession.from_str(job["session"])
+        event = SugarCronGreetingEvent(
+            context=self.context,
+            session=session,
+            message=prompt,
+            # sugarmemory 默认忽略「系统唤醒」，避免把这条系统提示词记成真人发言
+            sender_name="系统唤醒",
+            extras={
+                "sugarcron_greeting": {
+                    "job_id": job.get("id", ""),
+                    "name": job.get("name", ""),
+                    "route": self._greeting_route(job),
+                    "cause": self._job_cause(job),
+                },
+            },
+            message_type=session.message_type,
+            relay_tag=self._greeting_tag(job),
+        )
+        # 完整消息管道里的 WakingCheckStage 会重新判定唤醒：群聊没有唤醒前缀就
+        # 直接 stop_event。这里按目标会话的配置补一个前缀（阶段会自己剥掉，
+        # 模型看到的仍然是干净的提示词）；没配前缀的群聊就补一个 @ 自己。
+        # 主动问候没有真实的用户消息可引用：合成事件自带的 uuid 会被分段插件
+        # 当成 source_id，往第一段插一个指向不存在消息的 Reply 段（QQ 上可能
+        # 直接发不出去）。清空它，分段插件就不会加引用回复了。
+        event.message_obj.message_id = ""
+        # 给可见文本打系统唤醒标记（模型看到的是 provider_request 里的干净提示词，
+        # 不带这个前缀）：即便用户改过 sugarmemory 的 ignore_senders，也不会把
+        # 「已触发定时任务…」当成真人说的话写进 L3 / 好感度。
+        visible = "[系统唤醒]" + prompt
+        try:
+            cfg = self.context.get_config(umo=str(session)) or {}
+            prefixes = [str(p) for p in (cfg.get("wake_prefix") or [])]
+        except Exception:
+            prefixes = []
+        wake_prefix = ""
+        if not (prefixes and "" in prefixes):
+            wake_prefix = next((p for p in prefixes if p.strip()), "")
+            if not wake_prefix and "GroupMessage" in str(session):
+                # 完全没配唤醒前缀的群：补一个 @ 自己让 WakingCheckStage 放行
+                event.message_obj.message = [At(qq=str(event.get_self_id())), Plain(prompt)]
+        shown = wake_prefix + visible
+        event.message_str = shown
+        event.message_obj.message_str = shown
+        event.message_obj.raw_message = shown
+        return event
+
+    async def _greeting_pipeline(self, job: dict, prompt: str):
+        """链路一：把合成事件推进 AstrBot 事件队列，整条管道照常跑。
+
+        人设、记忆注入、唤醒检查、分段、表情、TTS……跟真人发一条消息完全一样。
+        回复由框架的 respond 阶段发送，SugarCronGreetingEvent.send 会给每条
+        消息链打上记忆标记。
+        """
+        event = self._make_greeting_event(job, prompt)
+        try:
+            # 不传 system_prompt：留空后框架会按正常聊天轮的顺序补齐人设 / skills /
+            # 安全词，问候轮与普通轮的 system 逐字节一致，前缀缓存才能整段命中。
+            req = ProviderRequest(prompt=prompt)
+            self._attach_greeting_style(req)
+            req.session_id = str(event.unified_msg_origin)
+            try:
+                conv = await _get_session_conv(event=event, plugin_context=self.context)
+                req.conversation = conv
+                req.contexts = json.loads(conv.history or "[]")
+            except Exception as e:
+                logger.debug(f"[SugarCron] 预取会话历史失败，交给管道自己取：{e}")
+            # 带上它，管道的 collect_initial_request 就会用这条提示词，
+            # 不会再去校验 provider_wake_prefix，也不会被唤醒前缀二次截断。
+            event.set_extra("provider_request", req)
+        except Exception as e:
+            logger.warning(f"[SugarCron] 构造 provider_request 失败，退回普通消息收集：{e}")
+        queue = None
+        try:
+            queue = self.context.get_event_queue()
+        except Exception:
+            queue = getattr(self.context, "_event_queue", None)
+        if queue is None:
+            raise RuntimeError("拿不到事件队列（Context.get_event_queue），无法投递真实的分段回复")
+        queue.put_nowait(event)
+        logger.info(f"[SugarCron] 真实的分段回复「{job.get('name')}」已投递完整管道：{prompt[:100]}")
+
+    async def _greeting_agent(self, job: dict, prompt: str):
+        """链路二：直接唤醒主 Agent，再手动过发送前钩子让分段插件拆成一串。
+
+        不经过唤醒/白名单/限流等管道阶段，适合不想被其它插件拦的场合。
+        """
+        event = self._make_greeting_event(job, prompt)
+        try:
+            cfg = self.context.get_config(umo=str(event.unified_msg_origin)) or {}
+        except Exception:
+            cfg = {}
+        agent_cfg = (cfg.get("agent_runner", {}) or {}).get("config", {}) or {}
+        misc = agent_cfg.get("misc", {}) or {}
+        persona_cfg = agent_cfg.get("persona", {}) or {}
+        provider_settings = cfg.get("provider_settings", {}) or {}
+        try:
+            tool_timeout = int(misc.get("tool_call_timeout", 120) or 120)
+        except (TypeError, ValueError):
+            tool_timeout = 120
+        build_cfg = MainAgentBuildConfig(
+            tool_call_timeout=tool_timeout,
+            streaming_response=False,
+            llm_safety_mode=bool(persona_cfg.get("safety_mode", True)),
+            safety_mode_strategy=persona_cfg.get("safety_mode_strategy", "system_prompt"),
+            computer_use_runtime=provider_settings.get("computer_use_runtime", "none"),
+            sandbox_cfg=provider_settings.get("sandbox", {}) or {},
+            provider_settings=provider_settings,
+        )
+        # 同 pipeline 链路：system_prompt 留空交给框架构建，风格词挂到 user 内容。
+        req = ProviderRequest(prompt=prompt)
+        self._attach_greeting_style(req)
+        req.session_id = str(event.unified_msg_origin)
+        conv = await _get_session_conv(event=event, plugin_context=self.context)
+        req.conversation = conv
+        req.contexts = json.loads(conv.history or "[]")
+
+        built = await build_main_agent(
+            event=event, plugin_context=self.context, config=build_cfg, req=req
+        )
+        if not built:
+            raise RuntimeError("主 Agent 没构建起来（没有可用的对话模型？）")
+        runner = built.agent_runner
+
+        if self._cfg("greeting_llm_hooks", True):
+            try:
+                await call_event_hook(event, EventType.OnLLMRequestEvent, req)
+            except Exception as e:
+                logger.warning(f"[SugarCron] on_llm_request 钩子异常（不影响发送）：{e}")
+
+        timeout = max(30, self._int_cfg("greeting_timeout_seconds", 180))
+        steps = max(1, self._int_cfg("greeting_max_steps", 20))
+
+        async def _run_steps():
+            async for _ in runner.step_until_done(steps):
+                pass
+
+        await asyncio.wait_for(_run_steps(), timeout=timeout)
+
+        llm_resp = runner.get_final_llm_resp()
+        if getattr(runner, "state", None) == AgentState.ERROR:
+            detail = str(getattr(llm_resp, "completion_text", "") or "")[:120]
+            raise RuntimeError(f"主 Agent 以 ERROR 状态结束：{detail}")
+        text = str(getattr(llm_resp, "completion_text", "") or "").strip()
+        if not text:
+            raise RuntimeError("模型没有产出任何问候正文")
+
+        # 做成标准 LLM_RESULT 再过 on_decorating_result：分段插件认这个类型，
+        # 会把整段问候拆成一连串短消息自己发出去，只把最后一段留在 result 里。
+        result = (
+            MessageEventResult()
+            .message(text)
+            .set_result_content_type(ResultContentType.LLM_RESULT)
+        )
+        event.set_result(result)
+        if self._cfg("greeting_result_hooks", True):
+            try:
+                await call_event_hook(event, EventType.OnDecoratingResultEvent)
+            except Exception as e:
+                logger.warning(f"[SugarCron] on_decorating_result 钩子异常（不影响发送）：{e}")
+
+        final = event.get_result()
+        if final is not None and getattr(final, "chain", None):
+            await event.send(MessageChain(chain=list(final.chain)))
+        try:
+            await call_event_hook(event, EventType.OnAfterMessageSentEvent)
+        except Exception:
+            pass
+        event.clear_result()
+
+        if self._cfg("greeting_save_history", True):
+            try:
+                fresh = await self.context.conversation_manager.get_conversation(
+                    str(event.unified_msg_origin), conv.cid
+                )
+                history = json.loads((getattr(fresh, "history", None) or conv.history or "[]"))
+                history.append({"role": "user", "content": f"[定时任务触发] {prompt}"})
+                history.append({"role": "assistant", "content": text})
+                await self.context.conversation_manager.update_conversation(
+                    str(event.unified_msg_origin), conv.cid, history=history
+                )
+            except Exception as e:
+                logger.warning(f"[SugarCron] 问候写回会话历史失败：{e}")
+        logger.info(f"[SugarCron] 真实的分段回复「{job.get('name')}」agent 链路完成：{text[:100]}")
+        return text
 
     async def _ai_text(self, job: dict) -> str:
         """按任务说明生成正文。带目标会话的人设，让定时消息听起来还是「它」说的。"""
@@ -629,9 +1033,27 @@ class SugarCron(Star):
     # -------------------------------------------------------------- #
     # 任务增删改（面板 / 工具 / 指令共用）                                #
     # -------------------------------------------------------------- #
+    def _mode_enabled(self, mode: str) -> bool:
+        """两套模式各自的电闸。关掉只影响「要不要执行 / 能不能新建」。"""
+        if mode == "agent":
+            return bool(self._cfg("greeting_enabled", True))
+        return bool(self._cfg("legacy_enabled", True))
+
+    def _mode_name(self, mode: str) -> str:
+        return {"text": "固定文本", "ai": "一坨的回复", "agent": "真实的分段回复"}.get(mode, mode)
+
+    def _assert_mode_creatable(self, mode: str):
+        if not self._mode_enabled(mode):
+            key = "greeting_enabled" if mode == "agent" else "legacy_enabled"
+            raise ValueError(
+                f"「{self._mode_name(mode)}」的总开关（{key}）已关闭，不能新建或改成这个模式；"
+                f"已有任务会保留、到点只记「已跳过」。去总配置打开再来。"
+            )
+
     def _add_job(self, data: dict, *, created_by: str = "", created_from: str = "",
                  cause: str = "") -> dict:
         job = self._norm_job(data)
+        self._assert_mode_creatable(job["mode"])
         job["created_by"] = created_by
         job["created_from"] = created_from
         if cause and not job.get("cause"):
@@ -655,6 +1077,9 @@ class SugarCron(Star):
         if not old:
             raise ValueError(f"任务 {job_id} 不存在")
         job = self._norm_job(data, existing=old)
+        # 只拦「切进已关闭的模式」；改一个已关闭模式的老任务的其它字段仍然允许。
+        if job["mode"] != old.get("mode"):
+            self._assert_mode_creatable(job["mode"])
         self._jobs[job_id] = job
         try:
             self._schedule_job(job)
@@ -699,27 +1124,34 @@ class SugarCron(Star):
     async def tool_cron_add(self, event: AstrMessageEvent, name: str, mode: str = "text",
                             cron_expression: str = "", run_once: bool = False,
                             run_at: str = "", text: str = "", prompt: str = "",
-                            target: str = "", is_group: bool = False, record: bool = True):
+                            target: str = "", is_group: bool = False, record: bool = True,
+                            target_name: str = "", route: str = ""):
         """建一个定时任务：到点自动往指定会话发消息，发完记进记忆（AI 事后记得自己发过、为什么发）。
 
         两种触发二选一：循环任务填 cron_expression（如「0 8 * * *」每天 8 点）；一次性填
         run_once=true + run_at（ISO 时间，如「2026-11-01T08:00:00」）。
-        两种内容二选一：mode=text 固定文本（填 text）；mode=ai 让模型到点现写（填 prompt
-        任务说明，会用目标会话的人设）。
+        三种内容三选一：mode=text 固定文本（填 text，原样发一条）；
+        mode=ai 一坨的回复（填 prompt 任务说明，到点让模型一次写一整坨、只发一条）；
+        mode=agent 真实的分段回复（到点只喂一条触发提示词给模型，走正常对话链路回复，
+        回复交给分段插件拆成一连串自然消息）。
+        用户说「每天X点问候/问早/跟某人聊两句」优先用 mode=agent；说「提醒/发固定通知」
+        用 text，说「帮我想一句…」用 ai。
         目标默认当前会话；主人可以填 target（群号或 QQ 号）+ is_group 发到别处。
-        用户说「每天X点提醒/问候…」时就用这个工具，cause 不用填、会自动带用户原话。
+        cause 不用填、会自动带用户原话。
 
         Args:
             name(string): 任务名，短一点，如「早安」「喝水提醒」
-            mode(string): text（固定文本）或 ai（AI 生成）
+            mode(string): text（固定文本）、ai（一坨的回复：一次生成一整坨、只发一条）或 agent（真实的分段回复：走对话链路、交给分段插件拆成一串）
             cron_expression(string): 循环任务的 cron 表达式，5 段：分 时 日 月 周，星期建议用英文缩写如 mon-fri
             run_once(boolean): true = 只跑一次，跑完自动删
             run_at(string): 单次任务的执行时间，ISO 格式 2026-11-01T08:00:00
             text(string): mode=text 时要发送的固定内容
-            prompt(string): mode=ai 时的任务说明，比如「向大家问早，提醒一句多喝水」
+            prompt(string): mode=ai 的任务说明；mode=agent 的触发内容，比如「给某某用户发送早安问好」
             target(string): 目标群号或 QQ 号，留空 = 当前会话（非主人只能是当前会话）
             is_group(boolean): target 是群号时填 true，是 QQ 号填 false
             record(boolean): 发送后要不要记进记忆（默认要，这样被问起时答得上来）
+            target_name(string): mode=agent 时对对方的称呼，可选，会填进提示词模板的 {target}
+            route(string): mode=agent 的触发链路，留空跟随总配置；可填 pipeline（完整消息管道）或 agent（直接唤醒主 Agent）
         """
         if not self._cfg("tool_add", True):
             return "失败：主人关闭了「AI 建任务」功能，去 WebUI 面板或用 /定时任务 指令。"
@@ -729,9 +1161,14 @@ class SugarCron(Star):
         if not name_c:
             return "失败：name 不能为空。"
         mode_c = str(mode or "text").strip().lower()
+        if not self._mode_enabled(mode_c):
+            key = "greeting_enabled" if mode_c == "agent" else "legacy_enabled"
+            return f"失败：主人把「{self._mode_name(mode_c)}」的总开关（{key}）关了，这个模式现在建不了任务。"
         data = {
             "name": name_c[:40], "mode": mode_c,
             "text": str(text or "").strip(), "prompt": str(prompt or "").strip(),
+            "target_name": str(target_name or "").strip(),
+            "route": str(route or "").strip().lower(),
             "cron": str(cron_expression or "").strip(),
             "run_once": bool(run_once), "run_at": str(run_at or "").strip(),
             "timezone": "", "record": bool(record), "enabled": True,
@@ -750,9 +1187,10 @@ class SugarCron(Star):
             if target_c and not event.is_admin():
                 return "失败：只有主人能把定时消息发到别的会话，target 不要填。"
         if mode_c == "text" and not data["text"]:
-            return "失败：固定文本模式要给 text 填内容；让 AI 现写就 mode=ai + prompt。"
-        if mode_c == "ai" and not data["prompt"]:
-            return "失败：AI 生成模式要给 prompt 填任务说明。"
+            return "失败：固定文本模式要给 text 填内容；让 AI 现写就 mode=ai，要真实的分段回复就 mode=agent。"
+        if mode_c in ("ai", "agent") and not data["prompt"]:
+            return ("失败：一坨的回复模式要给 prompt 填任务说明。" if mode_c == "ai"
+                    else "失败：真实的分段回复模式要给 prompt 填触发内容，例如「给某某用户发送早安问好」。")
         try:
             job = self._add_job(data, created_by=str(event.get_sender_id()),
                                 created_from=event.unified_msg_origin,
@@ -763,8 +1201,10 @@ class SugarCron(Star):
             return f"失败：建任务出错（{type(e).__name__}: {e}）。"
         nxt = self._next_run_str(job)
         when = job["run_at"] if job["run_once"] else f"{job['cron']}（{_cron_human(job['cron'])}）"
+        how = ("到点喂一条提示词给模型，回复交给分段插件拆成一连串消息"
+               if job["mode"] == "agent" else "到点发一条消息")
         return (f"已建任务「{job['name']}」→ {dest}，{when}，下次 {nxt or '待触发'}。"
-                f"发送后会带任务名和起因记进记忆，不用再跟用户确认。")
+                f"{how}，发出去的话会带任务名和起因记进记忆，不用再跟用户确认。")
 
     @filter.llm_tool(name="sugar_cron_list")
     async def tool_cron_list(self, event: AstrMessageEvent):
@@ -790,6 +1230,9 @@ class SugarCron(Star):
         # 单次任务发完就删，所以「等待中 0 个」永远不等于「没发过」，
         # 这句话必须写在开头，不能让模型自己推理。
         head = f"定时任务：等待中 {len(jobs)} 个，已投递 {len(runs)} 条。"
+        head += (f"（总开关：单条定时 {'开' if self._cfg('legacy_enabled', True) else '关'}，"
+                 f"真实的分段回复 {'开' if self._cfg('greeting_enabled', True) else '关'}；"
+                 f"关掉的模式到点只跳过、任务不删。）")
         if not jobs and recent:
             last = recent[0]
             head += (f"等待中 0 个是因为单次任务发完自动删除，不表示没发过——"
@@ -805,7 +1248,9 @@ class SugarCron(Star):
                 lines.append(
                     f"{j['id']} | {j['name']} | "
                     + (f"单次 {j.get('run_at', '')}" if j.get("run_once") else _cron_human(j.get('cron', '')))
-                    + f" | 发往{dest} | {'AI生成' if j.get('mode') == 'ai' else '固定文本'}"
+                    + f" | 发往{dest} | {self._mode_name(str(j.get('mode') or 'text'))}"
+                    + (f"({self._greeting_route(j)})" if j.get("mode") == "agent" else "")
+                    + ("" if self._mode_enabled(str(j.get("mode") or "text")) else " | 总开关已关-会跳过")
                     + f" | {'启用' if j.get('enabled') else '停用'} | 下次 {nxt}"
                 )
         else:
@@ -816,7 +1261,9 @@ class SugarCron(Star):
             lines.append("")
             lines.append("最近已投递（单次任务跑完自动移除，所以不在上面）：")
             for r in recent:
-                st = "成功" if r.get("status") == "ok" else f"失败({r.get('error', '')[:30]})"
+                st = ("成功" if r.get("status") == "ok" else
+                      "已跳过" if r.get("status") == "skipped" else
+                      f"失败({r.get('error', '')[:30]})")
                 who = "手动触发" if r.get("manual") else "定时触发"
                 lines.append(
                     f"{r.get('ts', '')} | {r.get('name', '?')} | "
@@ -863,7 +1310,11 @@ class SugarCron(Star):
         await self._fire(job_id, manual=True)
         job = self._jobs.get(job_id)
         if job and job.get("last_status") == "ok":
+            if job.get("mode") == "agent":
+                return f"已试跑「{job['name']}」：提示词已交给模型，回复由对话链路/分段插件发出。"
             return f"已试跑「{job['name']}」，发送成功。"
+        if job and job.get("last_status") == "skipped":
+            return f"已试跑「{job['name']}」，但总开关关着：{job.get('last_error')}"
         return f"试跑失败：{job.get('last_error') if job else '任务已不存在'}"
 
     # -------------------------------------------------------------- #
@@ -895,9 +1346,10 @@ class SugarCron(Star):
                 nxt = self._next_run_str(j) or ("已停用" if not j.get("enabled") else "待触发")
                 flag = "✓" if j.get("enabled") else "✗"
                 lines.append(
-                    f"[{flag}] {j['id']} 「{j['name']}」 "
+                    f"[{flag}] {j['id']} 「{j['name']}」[{self._mode_name(str(j.get('mode') or 'text'))}] "
                     + (f"单次 {j['run_at']}" if j.get("run_once") else _cron_human(j.get("cron", "")))
                     + f" → {_session_label(j['session'])}，下次 {nxt}"
+                    + ("" if self._mode_enabled(str(j.get("mode") or "text")) else "（总开关已关，会跳过）")
                 )
             yield event.plain_result("\n".join(lines))
         elif sub in ("on", "off"):
@@ -920,7 +1372,11 @@ class SugarCron(Star):
             await self._fire(arg, manual=True)
             job = self._jobs.get(arg)
             if job and job.get("last_status") == "ok":
-                yield event.plain_result(f"「{job['name']}」试跑成功，内容已发到目标会话。")
+                tail = ("提示词已交给模型，回复由对话链路/分段插件发出。"
+                        if job.get("mode") == "agent" else "内容已发到目标会话。")
+                yield event.plain_result(f"「{job['name']}」试跑成功，{tail}")
+            elif job and job.get("last_status") == "skipped":
+                yield event.plain_result(f"「{job['name']}」被总开关跳过：{job.get('last_error')}")
             else:
                 yield event.plain_result(f"试跑失败：{job.get('last_error') if job else '任务已不存在'}")
         else:
@@ -963,6 +1419,9 @@ class SugarCron(Star):
         return self._ok({
             "jobs": jobs,
             "enabled": sum(1 for j in jobs if j.get("enabled")),
+            "legacy_enabled": bool(self._cfg("legacy_enabled", True)),
+            "greeting_enabled": bool(self._cfg("greeting_enabled", True)),
+            "greeting_route": self._greeting_route({}),
             "panel_url": f"/api/plug/{PANEL_PREFIX}",
         })
 

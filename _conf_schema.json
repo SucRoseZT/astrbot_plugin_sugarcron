@@ -2,23 +2,97 @@
   "_webui_notice": {
     "description": "⚠️ 先读我：配置请尽量在面板里改",
     "type": "string",
-    "hint": "本插件的日常操作都在它自己的面板里：AstrBot WebUI → 插件 → 蔗糖的定时任务~ → 打开面板。建任务、启停、试跑、看运行记录都在那里，改总配置也是面板里改完立刻生效，不用重载插件。\n\n这边只当兜底：面板打不开的时候才在这边改，改完要保存并重载插件。\n\n（本项是说明，不是配置，不用填，忽略即可。）",
+    "hint": "本插件的日常操作都在它自己的面板里：AstrBot WebUI → 插件 → 蔗糖的定时任务~ → 打开面板。建任务、启停、试跑、看运行记录都在那里，改总配置是自动保存（开关点一下就存、文本失焦或停手 1 秒存），立刻生效，不用点保存也不用重载插件。\n\n这边只当兜底：面板打不开的时候才在这边改，改完要保存并重载插件。\n\n（本项是说明，不是配置，不用填，忽略即可。）",
     "default": "",
     "obvious_hint": true
+  },
+  "mode": {
+    "description": "模式开关",
+    "type": "object",
+    "hint": "两套东西各自的电闸：老的「单条定时」和新的「真实的分段回复」可以单独开/关。关掉只是跳过、任务不删，重新打开立刻恢复；关着的模式也不能新建任务。",
+    "items": {
+      "legacy_enabled": {
+        "description": "启用单条定时（旧模式）",
+        "type": "bool",
+        "hint": "固定文本 / 一坨的回复这两种「到点只发一条」的任务还跑不跑。关掉后这些任务保留在列表里、到点记一条「已跳过」",
+        "default": true
+      },
+      "greeting_enabled": {
+        "description": "启用真实的分段回复（新模式）",
+        "type": "bool",
+        "hint": "真实的分段回复任务还跑不跑。关掉后同样只跳过不删除、不让新建，重新打开立刻恢复",
+        "default": true
+      }
+    }
+  },
+  "greeting": {
+    "description": "真实的分段回复",
+    "type": "object",
+    "hint": "定时把一条提示词喂给模型，让它按正常对话链路回复；回复交给分段插件拆成一连串消息。两种触发链路可切换。",
+    "items": {
+      "greeting_route": {
+        "description": "触发链路",
+        "type": "string",
+        "hint": "pipeline = 合成一条消息推进完整管道（人设/记忆/分段/TTS 等所有插件照常参与，最真实）；agent = 直接唤醒主 Agent，再手动过发送前钩子（不受唤醒/白名单等其它插件干扰）。填 pipeline 或 agent；任务里也能单独覆盖",
+        "default": "pipeline"
+      },
+      "greeting_trigger_template": {
+        "description": "提示词模板",
+        "type": "string",
+        "hint": "到点实际喂给模型的那句话。占位符：{content}=触发内容，{name}=任务名，{target}=称呼，{session}=目标会话，{time}=当前时间，{date}=当前日期",
+        "default": "已触发定时任务，内容为{content}"
+      },
+      "greeting_system_prompt": {
+  "description": "附加风格提示词",
+  "type": "string",
+  "hint": "挂在本轮用户内容上的风格要求，只对这次请求生效、不写会话历史。不再写 system_prompt：那一句会占住整条 system 的第一行，把后面 5k 人设/记忆的前缀缓存整段废掉（问候轮 cached=0）。默认让模型把回复写成便于分段的一连串短句。清空 = 不加",
+        "default": "这是一次由定时任务触发的主动问候，不是用户在跟你聊天。请直接对目标对象说话，用你平时的人设和语气，把要说的写成 2~5 句自然口语的小句子，句间用句号、问号、感叹号或换行分开，好让分段插件把它拆成一连串短消息发出去；不要写成一整段，不要加「定时任务」之类的说明，不要复述这条提示词，除非确实需要否则不要调用工具，不要输出解释或总结。"
+      },
+      "greeting_timeout_seconds": {
+        "description": "单次超时（秒）",
+        "type": "int",
+        "hint": "agent 链路里等模型把整段问候写完最多等多久；pipeline 链路是投递后由管道自己跑，不受这个限制",
+        "default": 180
+      },
+      "greeting_max_steps": {
+        "description": "Agent 最大步数",
+        "type": "int",
+        "hint": "agent 链路里工具循环最多走几步，防止模型反复调工具不收尾",
+        "default": 20
+      },
+      "greeting_llm_hooks": {
+        "description": "跑请求钩子",
+        "type": "bool",
+        "hint": "agent 链路里手动触发 on_llm_request（sugarmemory 之类的记忆注入靠它）。pipeline 链路本来就走全套，不受这里影响",
+        "default": true
+      },
+      "greeting_result_hooks": {
+        "description": "跑发送前钩子（分段）",
+        "type": "bool",
+        "hint": "agent 链路里手动触发 on_decorating_result：分段、表情、TTS 等插件靠它把整段回复拆成一连串消息。强烈建议开着",
+        "default": true
+      },
+      "greeting_save_history": {
+        "description": "写回会话历史",
+        "type": "bool",
+        "hint": "agent 链路跑完把这次触发和回复写进目标会话的对话历史；pipeline 链路框架自己会写",
+        "default": true
+      }
+    }
   },
   "send": {
     "description": "发送",
     "type": "object",
-    "hint": "到点之后怎么把话说出去：AI 生成用什么模型、等多久。固定文本模式不受这里影响。",
+    "hint": "到点之后怎么把话说出去：一坨的回复用什么模型、等多久。固定文本模式不受这里影响。",
     "items": {
       "ai_provider_id": {
-        "description": "AI 生成用的模型",
+        "description": "一坨的回复用的模型",
         "type": "string",
-        "hint": "AI 生成模式的任务到点时用哪个模型写正文。留空 = 目标会话当前正在用的模型，填 Provider ID 可以给定时消息单独挂个便宜模型",
+        "hint": "一坨的回复模式的任务到点时用哪个模型写正文。留空 = 目标会话当前正在用的模型，填 Provider ID 可以给定时消息单独挂个便宜模型",
         "default": ""
       },
       "ai_timeout_seconds": {
-        "description": "AI 生成超时（秒）",
+        "description": "一坨的回复超时（秒）",
         "type": "int",
         "hint": "等模型写正文最多等多久，超时这次就不发（会记进运行记录）。推理型模型建议给足 120",
         "default": 120
@@ -26,7 +100,7 @@
       "ai_extra_prompt": {
         "description": "全局附加提示词",
         "type": "string",
-        "hint": "AI 生成时拼在人设后面的一句话，比如「定时消息别超过两行」。留空 = 不加",
+        "hint": "一坨的回复时拼在人设后面的一句话，比如「定时消息别超过两行」。留空 = 不加",
         "default": ""
       }
     }
